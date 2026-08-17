@@ -13,6 +13,8 @@ backend/                 FastAPI dataset API and Python tests
 frontend/                Vite + React + TypeScript client
   src/api.ts             typed HTTP client and shared API types
   src/App.tsx            routes
+  src/components/EChart.tsx reusable Apache ECharts lifecycle wrapper
+  src/visualizations/     focused visualization components
   src/pages/             role selection and student workspace
   src/styles.css         application styles
 AGENTS.md                repository working instructions
@@ -59,8 +61,11 @@ The frontend is a React 19 single-page application built by Vite. `main.tsx` mou
 - imports, selects, deletes, renames, and removes variables from datasets;
 - requests server-side previews, sorting, and filters;
 - persists preview filters and delete-confirmation preferences in browser `localStorage`;
-- builds line, scatter, bar, and histogram views from the loaded preview rows using inline SVG;
-- applies chart-only time bucketing, aggregation, transformations, date range, zoom, and pan in the browser.
+- builds line, scatter, bar, and histogram views from the loaded preview rows with Apache ECharts;
+- applies chart-only time bucketing, aggregation, transformations, and date range in the browser before passing values into ECharts. ECharts owns chart zooming and panning through its native data-zoom controls.
+- creates session-only custom numeric variables in the browser. These appear in the Data panel and preview table, and can be used in charts, but are deliberately not sent to or persisted by the API.
+
+`EChart.tsx` owns only the DOM-to-ECharts lifecycle: initialization, option updates, ResizeObserver-based resizing, and cleanup. `DatasetChart.tsx` is a focused renderer for uploaded-dataset line, scatter, bar, and histogram views; it receives prepared application data rather than owning transformations or aggregation. The sample is clearly marked as local demonstration data and does not use the API or persistence.
 
 The page requests at most 1,000 rows per preview. Charts therefore reflect the loaded preview, including its current server-side filters and sort order, rather than querying a separate chart endpoint.
 

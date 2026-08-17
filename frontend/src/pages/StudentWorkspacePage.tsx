@@ -1,7 +1,8 @@
-import { useEffect, useState, type ChangeEvent, type DragEvent } from 'react'
+import { useEffect, useMemo, useState, type ChangeEvent, type DragEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { deleteDataset, deleteVariable, getDatasets, getDescriptiveStatistics, getPreview, queryPreview, renameVariable, setDateOnlyDisplay, uploadDataset } from '../api'
 import type { DatasetPreview, DatasetSummary, DescriptiveStatistic, FilterOperator, PreviewFilter, VariableMetadata } from '../api'
+import { DatasetChart } from '../visualizations/DatasetChart'
 
 interface UploadButtonProps {
   className?: string
@@ -18,6 +19,29 @@ const SKIP_DATASET_DELETE_CONFIRMATION_KEY = 'garf.skipDatasetDeleteConfirmation
 const SKIP_VARIABLE_DELETE_CONFIRMATION_KEY = 'garf.skipVariableDeleteConfirmation'
 const PREVIEW_SCROLL_LIMIT = 1000
 const PREVIEW_FILTERS_KEY = 'garf.previewFilters'
+
+type CustomVariable = { name: string; formula: string }
+
+type CustomVariableDraft = { name: string; mode: 'guided' | 'formula'; kind: 'arithmetic' | 'transform' | 'time' | 'condition'; source: string; operator: string; operand: string; formula: string }
+
+const emptyCustomVariableDraft: CustomVariableDraft = { name: '', mode: 'guided', kind: 'arithmetic', source: '', operator: '+', operand: '0', formula: '' }
+
+function numericValue(value: unknown) { const number = Number(value); return Number.isFinite(number) ? number : Number.NaN }
+
+// A deliberately small, explicit formula language; it never evaluates arbitrary JavaScript.
+function calculateCustomValue(formula: string, row: Record<string, unknown>, rows: Record<string, unknown>[], index: number) {
+  const source = (name: string) => numericValue(row[name])
+  const text = formula.trim()
+  const unary = text.match(/^(log|sqrt|abs)\(([A-Za-z_][\w]*)\)$/i)
+  if (unary) { const value = source(unary[2]); return unary[1].toLowerCase() === 'log' ? value > 0 ? Math.log(value) : Number.NaN : unary[1].toLowerCase() === 'sqrt' ? value >= 0 ? Math.sqrt(value) : Number.NaN : Math.abs(value) }
+  const time = text.match(/^(lag|diff|pct_change)\(([A-Za-z_][\w]*)(?:,\s*(\d+))?\)$/i)
+  if (time) { const periods = Number(time[3] ?? 1); const current = source(time[2]); const previous = numericValue(rows[index - periods]?.[time[2]]); return index < periods ? Number.NaN : time[1].toLowerCase() === 'lag' ? previous : time[1].toLowerCase() === 'diff' ? current - previous : previous === 0 ? Number.NaN : (current - previous) / previous * 100 }
+  const condition = text.match(/^if\(([A-Za-z_][\w]*)\s*(<=|>=|==|!=|<|>)\s*(-?[\d.]+),\s*(-?[\d.]+),\s*(-?[\d.]+)\)$/i)
+  if (condition) { const value = source(condition[1]); const threshold = Number(condition[3]); const passed = ({ '<': value < threshold, '<=': value <= threshold, '>': value > threshold, '>=': value >= threshold, '==': value === threshold, '!=': value !== threshold })[condition[2]]; return passed ? Number(condition[4]) : Number(condition[5]) }
+  const arithmetic = text.match(/^([A-Za-z_][\w]*|-?[\d.]+)\s*([+\-*/])\s*([A-Za-z_][\w]*|-?[\d.]+)$/)
+  if (arithmetic) { const left = /^[A-Za-z_]/.test(arithmetic[1]) ? source(arithmetic[1]) : Number(arithmetic[1]); const right = /^[A-Za-z_]/.test(arithmetic[3]) ? source(arithmetic[3]) : Number(arithmetic[3]); return arithmetic[2] === '+' ? left + right : arithmetic[2] === '-' ? left - right : arithmetic[2] === '*' ? left * right : right === 0 ? Number.NaN : left / right }
+  return Number.NaN
+}
 
 const FILTER_LABELS: Record<FilterOperator, string> = {
   equals: 'is', not_equals: 'is not', contains: 'contains', greater_than: 'is greater than', less_than: 'is less than', between: 'is between', before: 'is before', after: 'is after', is_missing: 'is missing', is_not_missing: 'is not missing',
@@ -91,6 +115,7 @@ export function StudentWorkspacePage() {
   const [plotXAxis, setPlotXAxis] = useState<string | null>(null)
   const [plotYAxes, setPlotYAxes] = useState<string[]>([])
   const [draggingVariable, setDraggingVariable] = useState<string | null>(null)
+  const [variableOrder, setVariableOrder] = useState<string[]>([])
   const [activeDropZone, setActiveDropZone] = useState<'x' | 'y' | null>(null)
   const [canvasMode, setCanvasMode] = useState<'builder' | 'preview' | 'chart' | 'model'>('builder')
   const [isChartSettingsOpen, setIsChartSettingsOpen] = useState(false)
@@ -99,10 +124,15 @@ export function StudentWorkspacePage() {
   const [chartTransformation, setChartTransformation] = useState<'original' | 'simple_diff' | 'log_diff'>('original')
   const [chartStartDate, setChartStartDate] = useState('')
   const [chartEndDate, setChartEndDate] = useState('')
-  const [chartZoom, setChartZoom] = useState(1)
-  const [chartZoomStart, setChartZoomStart] = useState(0)
   const [isRestoring, setIsRestoring] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [customVariables, setCustomVariables] = useState<CustomVariable[]>([])
+  const [isCustomVariableModalOpen, setIsCustomVariableModalOpen] = useState(false)
+  const [customVariableDraft, setCustomVariableDraft] = useState<CustomVariableDraft>(emptyCustomVariableDraft)
+  const [customVariableError, setCustomVariableError] = useState<string | null>(null)
+  const [selectedPreviewRows, setSelectedPreviewRows] = useState<number[]>([])
+  const [previewSelectionAnchor, setPreviewSelectionAnchor] = useState<number | null>(null)
+  const [isPreviewRangeSelecting, setIsPreviewRangeSelecting] = useState(false)
 
   async function activateDataset(nextDataset: DatasetSummary) {
     const savedFilters = readSavedFilters(nextDataset.id)
@@ -113,6 +143,7 @@ export function StudentWorkspacePage() {
     setDataset(nextDataset)
     setPlotXAxis(null)
     setPlotYAxes([])
+    setVariableOrder(nextDataset.variables.map((variable) => variable.name))
     setDraggingVariable(null)
     setActiveDropZone(null)
     setCanvasMode('builder')
@@ -130,6 +161,7 @@ export function StudentWorkspacePage() {
     setDraftValue('')
     setDraftSecondValue('')
     setPreview(nextPreview)
+    setCustomVariables([])
   }
 
   useEffect(() => {
@@ -401,6 +433,22 @@ export function StudentWorkspacePage() {
     setDraggingVariable(variableName)
   }
 
+  function reorderVariableList(event: DragEvent<HTMLLIElement>, targetName: string) {
+    event.preventDefault()
+    const sourceName = event.dataTransfer.getData('text/plain') || draggingVariable
+    if (!sourceName || sourceName === targetName) return
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const insertAfter = event.clientY > bounds.top + bounds.height / 2
+    setVariableOrder((current) => {
+      const order = current.length ? current : dataset?.variables.map((variable) => variable.name) ?? []
+      const withoutSource = order.filter((name) => name !== sourceName)
+      const targetIndex = withoutSource.indexOf(targetName)
+      const insertionIndex = targetIndex + (insertAfter ? 1 : 0)
+      return targetIndex < 0 ? order : [...withoutSource.slice(0, insertionIndex), sourceName, ...withoutSource.slice(insertionIndex)]
+    })
+    setDraggingVariable(null)
+  }
+
   function handleVariableDrop(event: DragEvent<HTMLDivElement>, target: 'x' | 'y') {
     event.preventDefault()
     const variableName = event.dataTransfer.getData('text/plain') || draggingVariable
@@ -416,16 +464,63 @@ export function StudentWorkspacePage() {
     else if (variableName) setPlotYAxes((current) => current.filter((item) => item !== variableName))
   }
 
+  const previewRows = preview?.rows ?? []
+  const augmentedPreviewRows = useMemo(() => {
+    const calculatedRows: Record<string, unknown>[] = []
+    previewRows.forEach((originalRow, index) => {
+      const row = { ...originalRow }
+      customVariables.forEach((variable) => { row[variable.name] = calculateCustomValue(variable.formula, row, calculatedRows, index) })
+      calculatedRows.push(row)
+    })
+    return calculatedRows
+  }, [previewRows, customVariables])
+  const previewColumns = [...(preview?.columns ?? []), ...customVariables.map((variable) => variable.name)]
+  const numericVariableNames = dataset?.variables.filter((variable) => variable.logical_type === 'numeric').map((variable) => variable.name) ?? []
+  function openCustomVariableModal() { setCustomVariableDraft({ ...emptyCustomVariableDraft, source: numericVariableNames[0] ?? '' }); setCustomVariableError(null); setIsCustomVariableModalOpen(true) }
+  function addCustomVariable() {
+    const name = customVariableDraft.name.trim()
+    const formula = customVariableDraft.mode === 'formula' ? customVariableDraft.formula.trim() : customVariableDraft.kind === 'arithmetic' ? `${customVariableDraft.source} ${customVariableDraft.operator} ${customVariableDraft.operand}` : customVariableDraft.kind === 'transform' ? `${customVariableDraft.operator}(${customVariableDraft.source})` : customVariableDraft.kind === 'time' ? `${customVariableDraft.operator}(${customVariableDraft.source}${customVariableDraft.operand ? `, ${customVariableDraft.operand}` : ''})` : customVariableDraft.formula.trim()
+    if (!name || !/^[A-Za-z_]\w*$/.test(name)) { setCustomVariableError('Use a unique variable name beginning with a letter or underscore.'); return }
+    if (dataset?.variables.some((variable) => variable.name === name) || customVariables.some((variable) => variable.name === name)) { setCustomVariableError('That variable name is already in use.'); return }
+    if (!formula) { setCustomVariableError('Define a formula before adding the variable.'); return }
+    setCustomVariables((current) => [...current, { name, formula }])
+    setIsCustomVariableModalOpen(false)
+  }
+  function selectPreviewRow(rowIndex: number, extend = false) {
+    const anchor = extend ? previewSelectionAnchor ?? rowIndex : rowIndex
+    const start = Math.min(anchor, rowIndex)
+    const end = Math.max(anchor, rowIndex)
+    setSelectedPreviewRows(Array.from({ length: end - start + 1 }, (_, index) => start + index))
+    if (!extend) setPreviewSelectionAnchor(rowIndex)
+  }
+  function startPreviewRangeSelection(rowIndex: number) {
+    setPreviewSelectionAnchor((current) => current ?? rowIndex)
+    setIsPreviewRangeSelecting(true)
+    selectPreviewRow(rowIndex, true)
+  }
+  useEffect(() => { setSelectedPreviewRows([]); setPreviewSelectionAnchor(null); setIsPreviewRangeSelecting(false) }, [preview?.dataset_id, preview?.offset, preview?.total_rows])
+
+  const orderedDatasetVariables = dataset ? [...dataset.variables].sort((left, right) => {
+    const leftIndex = variableOrder.indexOf(left.name)
+    const rightIndex = variableOrder.indexOf(right.name)
+    return (leftIndex < 0 ? Number.MAX_SAFE_INTEGER : leftIndex) - (rightIndex < 0 ? Number.MAX_SAFE_INTEGER : rightIndex)
+  }) : []
   const draftVariable = dataset?.variables.find((item) => item.name === draftColumn)
   const draftOperators = draftVariable ? operatorsFor(draftVariable) : ['equals'] as FilterOperator[]
-  const chartRows = preview?.rows ?? []
+  const chartRows = augmentedPreviewRows
   const chartPalette = ['#e65f2d', '#24766b', '#7467a4', '#b98422', '#4d7195']
   const datedChartRows = plotXAxis ? chartRows.map((row) => ({ row, date: new Date(String(row[plotXAxis])) })).filter((item) => !Number.isNaN(item.date.getTime())) : []
   const availableStartDate = datedChartRows[0]?.date.toISOString().slice(0, 10) ?? ''
   const availableEndDate = datedChartRows.at(-1)?.date.toISOString().slice(0, 10) ?? ''
-  const selectedStart = chartStartDate ? new Date(`${chartStartDate}T00:00:00`) : null
-  const selectedEnd = chartEndDate ? new Date(`${chartEndDate}T23:59:59.999`) : null
-  const filteredChartRows = datedChartRows.filter(({ date }) => (!selectedStart || date >= selectedStart) && (!selectedEnd || date <= selectedEnd))
+  // compare canonical calendar-day keys rather than local Date objects so date-input
+  // changes cannot be shifted by the browser timezone and empty the active chart.
+  const rangeFilteredChartRows = datedChartRows.filter(({ date }) => {
+    const day = date.toISOString().slice(0, 10)
+    return (!chartStartDate || day >= chartStartDate) && (!chartEndDate || day <= chartEndDate)
+  })
+  // Keep the active chart mounted if a temporary/incomplete date range matches nothing.
+  // This protects the ECharts instance while the user adjusts either boundary.
+  const filteredChartRows = rangeFilteredChartRows.length ? rangeFilteredChartRows : datedChartRows
   const rawTimestampGaps = datedChartRows.slice(1).map((item, index) => (item.date.getTime() - datedChartRows[index].date.getTime()) / 86_400_000)
   const timestampGaps = rawTimestampGaps.filter((gap) => gap > 0).sort((left, right) => left - right)
   const medianGapDays = timestampGaps.length ? timestampGaps[Math.floor(timestampGaps.length / 2)] : null
@@ -454,61 +549,31 @@ export function StudentWorkspacePage() {
     buckets.set(key, current)
     return buckets
   }, new Map<string, typeof filteredChartRows>()).entries())
-  const visibleBucketCount = Math.max(2, Math.ceil(chartBuckets.length / chartZoom))
-  const maximumZoomStart = Math.max(0, chartBuckets.length - visibleBucketCount)
-  const safeZoomStart = Math.min(chartZoomStart, maximumZoomStart)
-  const visibleChartBuckets = chartBuckets.slice(safeZoomStart, safeZoomStart + visibleBucketCount)
   const aggregate = (values: number[]) => chartAggregation === 'sum' ? values.reduce((total, value) => total + value, 0) : chartAggregation === 'last' ? values.at(-1)! : values.reduce((total, value) => total + value, 0) / values.length
-  const chartSeries = plotYAxes.map((name, index) => {
-    const baseValues = visibleChartBuckets.map(([label, bucket]) => ({ label, value: aggregate(bucket.map(({ row }) => Number(row[name])).filter(Number.isFinite)) })).filter((item) => Number.isFinite(item.value))
+  const lineLabels = chartBuckets.map(([label]) => label)
+  const lineSeries = plotYAxes.map((name, index) => {
+    const baseValues = chartBuckets.map(([label, bucket]) => ({ label, value: aggregate(bucket.map(({ row }) => Number(row[name])).filter(Number.isFinite)) })).filter((item) => Number.isFinite(item.value))
     const transformedValues = chartTransformation === 'original' ? baseValues : baseValues.slice(1).map((item, itemIndex) => {
       const previous = baseValues[itemIndex].value
       return { label: item.label, value: chartTransformation === 'log_diff' && previous > 0 && item.value > 0 ? Math.log(item.value) - Math.log(previous) : chartTransformation === 'simple_diff' ? item.value - previous : Number.NaN }
     }).filter((item) => Number.isFinite(item.value))
-    const values = transformedValues.map((item) => item.value)
-    const min = Math.min(...values)
-    const max = Math.max(...values)
-    const span = max - min || 1
-    const points = transformedValues.map((item, itemIndex) => {
-      const x = transformedValues.length <= 1 ? 50 : 7 + (itemIndex / (transformedValues.length - 1)) * 89
-      const y = 91 - ((item.value - min) / span) * 78
-      return `${x.toFixed(2)},${y.toFixed(2)}`
-    })
-    return { name, color: chartPalette[index % chartPalette.length], min, max, points }
-  }).filter((series) => series.points.length > 0)
-  const displayedPeriodLabels = visibleChartBuckets.map(([label]) => label)
-  const chartStartLabel = displayedPeriodLabels[0] ?? ''
-  const chartEndLabel = displayedPeriodLabels.at(-1) ?? ''
-  const chartTickCount = Math.min(6, displayedPeriodLabels.length)
-  const chartDateTicks = Array.from({ length: chartTickCount }, (_, index) => {
-    const labelIndex = chartTickCount <= 1 ? 0 : Math.round((index / (chartTickCount - 1)) * (displayedPeriodLabels.length - 1))
-    return { label: displayedPeriodLabels[labelIndex], position: chartTickCount <= 1 ? 50 : index / (chartTickCount - 1) * 100 }
-  })
-  function changeChartZoom(direction: 'in' | 'out') {
-    setChartZoom((current) => {
-      const next = direction === 'in' ? Math.min(8, current * 2) : Math.max(1, current / 2)
-      if (next === 1) setChartZoomStart(0)
-      return next
-    })
-  }
-  function panChart(direction: 'back' | 'forward') {
-    const step = Math.max(1, Math.floor(visibleBucketCount * .45))
-    setChartZoomStart((current) => Math.max(0, Math.min(maximumZoomStart, current + (direction === 'forward' ? step : -step))))
-  }
-  const scatterSeries = plotYAxes.map((name, index) => {
-    const pairs = chartRows.map((row) => ({ x: Number(row[plotXAxis ?? '']), y: Number(row[name]) })).filter((pair) => Number.isFinite(pair.x) && Number.isFinite(pair.y))
-    const xValues = pairs.map((pair) => pair.x); const yValues = pairs.map((pair) => pair.y)
-    const xMin = Math.min(...xValues); const xSpan = Math.max(...xValues) - xMin || 1; const yMin = Math.min(...yValues); const ySpan = Math.max(...yValues) - yMin || 1
-    return { name, color: chartPalette[index % chartPalette.length], points: pairs.map((pair) => `${(7 + ((pair.x - xMin) / xSpan) * 89).toFixed(2)},${(91 - ((pair.y - yMin) / ySpan) * 78).toFixed(2)}`) }
-  }).filter((series) => series.points.length > 0)
+    return { name, color: chartPalette[index % chartPalette.length], data: transformedValues }
+  }).filter((series) => series.data.length > 0)
+  const scatterSeries = plotYAxes.map((name, index) => ({
+    name,
+    color: chartPalette[index % chartPalette.length],
+    data: chartRows.map((row) => [Number(row[plotXAxis ?? '']), Number(row[name])] as [number, number]).filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y)),
+  })).filter((series) => series.data.length > 0)
   const barCategories = chartRows.map((row) => valueForCell(row[plotXAxis ?? '']))
-  const barValues = plotYAxes.map((name, seriesIndex) => ({ name, color: chartPalette[seriesIndex % chartPalette.length], values: chartRows.map((row) => Number(row[name])) }))
-  const barMaximum = Math.max(1, ...barValues.flatMap((series) => series.values).filter(Number.isFinite))
+  const barSeries = plotYAxes.map((name, index) => ({ name, color: chartPalette[index % chartPalette.length], data: chartRows.map((row) => Number(row[name])).map((value) => Number.isFinite(value) ? value : null) }))
   const histogramValues = plotYAxes.length ? chartRows.map((row) => Number(row[plotYAxes[0]])).filter(Number.isFinite) : []
   const histogramMin = Math.min(...histogramValues); const histogramMax = Math.max(...histogramValues); const histogramWidth = (histogramMax - histogramMin || 1) / 10
-  const histogramBins = Array.from({ length: 10 }, (_, index) => ({ start: histogramMin + index * histogramWidth, count: histogramValues.filter((value) => index === 9 ? value >= histogramMin + index * histogramWidth && value <= histogramMax : value >= histogramMin + index * histogramWidth && value < histogramMin + (index + 1) * histogramWidth).length }))
-  const histogramMaxCount = Math.max(1, ...histogramBins.map((bin) => bin.count))
-  const chartCanRender = chartType === 'line' ? chartSeries.length > 0 : chartType === 'scatter' ? scatterSeries.length > 0 : chartType === 'bar' ? barValues.some((series) => series.values.some(Number.isFinite)) : histogramValues.length > 0
+  const histogramBins = Array.from({ length: 10 }, (_, index) => {
+    const start = histogramMin + index * histogramWidth
+    const end = start + histogramWidth
+    return { label: `${start.toFixed(2)}–${end.toFixed(2)}`, count: histogramValues.filter((value) => index === 9 ? value >= start && value <= histogramMax : value >= start && value < end).length }
+  })
+  const chartCanRender = chartType === 'line' ? lineSeries.length > 0 : chartType === 'scatter' ? scatterSeries.length > 0 : chartType === 'bar' ? barSeries.some((series) => series.data.some((value) => value !== null)) : histogramValues.length > 0
 
   return (
     <main className="workspace-page">
@@ -573,7 +638,7 @@ export function StudentWorkspacePage() {
               )}
 
               <ul className="variable-list" aria-label="Dataset variables">
-                {dataset.variables.map((variable) => {
+                {orderedDatasetVariables.map((variable) => {
                   const isOnlyVariable = dataset.variables.length === 1
                   const isDeletingThisVariable = deletingVariable === variable.name
                   return (
@@ -583,7 +648,9 @@ export function StudentWorkspacePage() {
                       draggable
                       onDragStart={(event) => handleVariableDragStart(event, variable.name)}
                       onDragEnd={() => { setDraggingVariable(null); setActiveDropZone(null) }}
-                      title={`Drag ${variable.name} into the visualization builder`}
+                      onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }}
+                      onDrop={(event) => reorderVariableList(event, variable.name)}
+                      title={`Drag ${variable.name} into the visualization builder, or drop it on another variable to reorder the Data list`}
                     >
                       <span className={`variable-type variable-type--${variable.logical_type}`} aria-hidden="true" />
                       <button
@@ -604,11 +671,13 @@ export function StudentWorkspacePage() {
                           <button type="submit" disabled={isRenaming}>{isRenaming ? '…' : 'Save'}</button>
                           <button type="button" onClick={() => { setRenamingVariable(null); setRenameValue('') }} disabled={isRenaming}>Cancel</button>
                         </form>
-                      ) : <><span>{variable.name}</span><button className="rename-variable" type="button" onClick={(event) => { event.stopPropagation(); beginRename(variable.name) }} onMouseDown={(event) => event.stopPropagation()} aria-label={`Rename ${variable.name}`} title="Rename variable"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m4 16.5-.7 4.2 4.2-.7L18.7 8.8 15.2 5.3 4 16.5Zm9.8-11.2 3.5 3.5m-10 7.2 2.3.5.5 2.3" /></svg></button><small>{variable.logical_type}</small></>}
+                      ) : <><span>{variable.name}</span><span className="variable-row__actions"><button className="rename-variable" type="button" onClick={(event) => { event.stopPropagation(); beginRename(variable.name) }} onMouseDown={(event) => event.stopPropagation()} aria-label={`Rename ${variable.name}`} title="Rename variable"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m4 16.5-.7 4.2 4.2-.7L18.7 8.8 15.2 5.3 4 16.5Zm9.8-11.2 3.5 3.5m-10 7.2 2.3.5.5 2.3" /></svg></button></span><small>{variable.logical_type}</small></>}
                     </li>
                   )
                 })}
+                {customVariables.map((variable) => <li key={variable.name} className="variable-row variable-row--draggable variable-row--custom" draggable onDragStart={(event) => handleVariableDragStart(event, variable.name)} onDragEnd={() => { setDraggingVariable(null); setActiveDropZone(null) }} title={`Session-only custom variable: ${variable.formula}`}><span className="variable-type variable-type--numeric" aria-hidden="true" /><button className="delete-variable" type="button" onClick={() => setCustomVariables((current) => current.filter((item) => item.name !== variable.name))} aria-label={`Remove custom variable ${variable.name}`}>×</button><span>{variable.name}</span><small>custom</small></li>)}
               </ul>
+              <button className="custom-variable-button custom-variable-button--below" type="button" onClick={openCustomVariableModal}><span aria-hidden="true">+</span> Custom variable</button>
             </div>
           ) : (
             <div className="data-empty">
@@ -618,7 +687,6 @@ export function StudentWorkspacePage() {
             </div>
           )}
 
-          <div className="sidebar-footnote"><span className="sidebar-footnote__rule" /><p>{dataset ? 'Select variables to build your first visualization.' : 'Variables become building blocks for charts and analyses.'}</p></div>
         </aside>
 
         <section className="workspace-canvas" aria-labelledby="canvas-title">
@@ -641,24 +709,12 @@ export function StudentWorkspacePage() {
             ) : canvasMode === 'chart' ? (
               <div className="chart-stage">
                 <div className="chart-stage__toolbar">
-                  <div><p className="upload-stage__eyebrow">{chartType === 'scatter' ? 'Scatter plot' : chartType === 'bar' ? 'Bar chart' : chartType === 'histogram' ? 'Histogram' : 'Line chart'}</p><h3>{plotYAxes.length === 1 ? plotYAxes[0] : `${plotYAxes.length} selected series`}</h3><p>{chartType === 'histogram' ? `${chartRows.length.toLocaleString()} observations shown` : `${plotXAxis} on the horizontal axis · ${chartRows.length.toLocaleString()} observations shown`}</p></div>
+                  <div><p className="upload-stage__eyebrow">{chartType === 'scatter' ? 'Scatter plot' : chartType === 'bar' ? 'Bar chart' : chartType === 'histogram' ? 'Histogram' : 'Line chart'}</p><h3>{plotYAxes.length === 1 ? plotYAxes[0] : `${plotYAxes.length} selected series`}</h3><p>{chartRows.length.toLocaleString()} observations shown</p></div>
                   <button type="button" className="canvas-mode-button" onClick={() => setCanvasMode('builder')}>Edit variables <span aria-hidden="true">→</span></button>
                 </div>
                 {chartCanRender ? <>
-                  <div className="chart-stage__legend" aria-label="Chart series legend">{(chartType === 'scatter' ? scatterSeries : chartType === 'histogram' ? [{ name: plotYAxes[0], color: chartPalette[0] }] : chartSeries).map((series) => <span key={series.name}><i style={{ backgroundColor: series.color }} />{series.name}</span>)}</div>
-                  {chartType === 'line' && chartBuckets.length > 2 && <div className="chart-zoom-controls" aria-label="Chart zoom controls">
-                    <span>{chartZoom > 1 ? `${chartZoom}× zoom` : 'Full period'}</span>
-                    <button type="button" onClick={() => panChart('back')} disabled={safeZoomStart === 0} aria-label="Show earlier observations">←</button>
-                    <button type="button" onClick={() => changeChartZoom('out')} disabled={chartZoom === 1} aria-label="Zoom out">−</button>
-                    <button type="button" onClick={() => changeChartZoom('in')} disabled={visibleBucketCount <= 2} aria-label="Zoom in">+</button>
-                    <button type="button" onClick={() => panChart('forward')} disabled={safeZoomStart >= maximumZoomStart} aria-label="Show later observations">→</button>
-                    {chartZoom > 1 && <button type="button" className="chart-zoom-controls__reset" onClick={() => { setChartZoom(1); setChartZoomStart(0) }}>Reset view</button>}
-                  </div>}
-                  <div className="chart-stage__plot"><svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${chartType} chart of ${plotYAxes.join(', ')}${plotXAxis ? ` by ${plotXAxis}` : ''}`}><line className="chart-gridline" x1="7" y1="13" x2="96" y2="13" /><line className="chart-gridline" x1="7" y1="39" x2="96" y2="39" /><line className="chart-gridline" x1="7" y1="65" x2="96" y2="65" /><line className="chart-axis" x1="7" y1="91" x2="96" y2="91" />{chartType === 'line' && chartSeries.map((series) => <polyline key={series.name} points={series.points.join(' ')} fill="none" stroke={series.color} strokeWidth="0.62" vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />)}{chartType === 'scatter' && scatterSeries.flatMap((series) => series.points.map((point, index) => { const [cx, cy] = point.split(','); return <circle key={`${series.name}-${index}`} cx={cx} cy={cy} r="1.15" fill={series.color} opacity=".78" vectorEffect="non-scaling-stroke" /> }))}{chartType === 'bar' && barValues.flatMap((series, seriesIndex) => series.values.map((value, index) => { if (!Number.isFinite(value)) return null; const categoryWidth = 89 / Math.max(1, barCategories.length); const width = categoryWidth / Math.max(1, barValues.length) * .72; const x = 7 + index * categoryWidth + seriesIndex * width + categoryWidth * .14; const height = value / barMaximum * 78; return <rect key={`${series.name}-${index}`} x={x} y={91 - height} width={width} height={height} rx=".3" fill={series.color} /> }))}{chartType === 'histogram' && histogramBins.map((bin, index) => { const width = 89 / histogramBins.length * .78; const x = 7 + index * (89 / histogramBins.length) + (89 / histogramBins.length) * .11; const height = bin.count / histogramMaxCount * 78; return <rect key={bin.start} x={x} y={91 - height} width={width} height={height} rx=".3" fill={chartPalette[0]} /> })}</svg></div>
-                  <div className="chart-stage__x-axis" aria-label={`${plotXAxis} date points`}>
-                    <div className="chart-stage__ticks">{chartDateTicks.map((tick, index) => <span key={`${tick.label}-${index}`} style={{ left: `${tick.position}%` }} title={tick.label}>{tick.label}</span>)}</div>
-                    <span className="chart-stage__axis-name">{plotXAxis}</span>
-                  </div>
+                  <div className="chart-stage__legend" aria-label="Chart series legend">{(chartType === 'scatter' ? scatterSeries : chartType === 'histogram' ? [{ name: plotYAxes[0], color: chartPalette[0] }] : chartType === 'bar' ? barSeries : lineSeries).map((series) => <span key={series.name}><i style={{ backgroundColor: series.color }} />{series.name}</span>)}</div>
+                  <DatasetChart type={chartType} xAxisName={plotXAxis} lineLabels={lineLabels} lineSeries={lineSeries} scatterSeries={scatterSeries} barCategories={barCategories} barSeries={barSeries} histogramBins={histogramBins} />
                   <div className="chart-settings">
                     <button type="button" className="chart-settings__toggle" onClick={() => setIsChartSettingsOpen((current) => !current)} aria-expanded={isChartSettingsOpen}>Chart settings <span aria-hidden="true">{isChartSettingsOpen ? '⌃' : '⌄'}</span></button>
                     {isChartSettingsOpen && <div className="chart-settings__panel">
@@ -670,7 +726,7 @@ export function StudentWorkspacePage() {
                       <button type="button" className="chart-settings__reset" onClick={() => { setChartFrequency('original'); setChartAggregation('mean'); setChartTransformation('original'); setChartStartDate(''); setChartEndDate('') }}>Reset</button>
                     </div>}
                   </div>
-                  <p className="chart-stage__note">Each series uses its own vertical scale, shown in the legend, so variables with different units remain visible together.</p>
+                  <p className="chart-stage__note">Transformations and aggregation are calculated in the browser before values are passed to ECharts.</p>
                 </> : <div className="chart-stage__empty"><strong>No numeric observations to plot.</strong><span>Adjust the selected variables or filters, then create the chart again.</span></div>}
               </div>
             ) : canvasMode === 'preview' ? (
@@ -696,9 +752,9 @@ export function StudentWorkspacePage() {
                 </div>
                 {filters.length > 0 && <div className="active-filters">{filters.map((filter, index) => <button key={`${filter.column}-${index}`} type="button" onClick={() => removeFilter(index)} title="Remove filter">{filter.column} · {filter.operator.replaceAll('_', ' ')}{filter.value ? `: ${filter.value}` : ''}<span aria-hidden="true">×</span></button>)}</div>}
                 <div className="preview-table-scroll">
-                  {preview ? <table className="preview-table"><thead><tr><th><button type="button" className="preview-sort" onClick={() => void handlePreviewSort('__row_number__')} aria-label="Sort observations"># {sortColumn === '__row_number__' ? (sortDirection === 'ascending' ? '↑' : '↓') : ''}</button></th>{preview.columns.map((column) => <th key={column}><span><button type="button" className="preview-sort" onClick={() => void handlePreviewSort(column)} disabled={isSorting}>{column} {sortColumn === column ? (sortDirection === 'ascending' ? '↑' : '↓') : ''}</button>{preview.date_format_suggestions.includes(column) && <button className="date-warning" type="button" onClick={() => setSelectedDateSuggestion(column)} aria-label={`Format suggestion for ${column}`} title="Date display suggestion">!</button>}</span></th>)}</tr></thead><tbody>{preview.rows.map((row, rowIndex) => <tr key={preview.source_row_numbers[rowIndex] ?? rowIndex}><td>{preview.source_row_numbers[rowIndex] ?? rowIndex + 1}</td>{preview.columns.map((column) => <td key={column}>{row[column] === null || row[column] === undefined ? '—' : String(row[column])}</td>)}</tr>)}</tbody></table> : <p className="preview-loading">Loading preview…</p>}</div>
+                  {preview ? <table className="preview-table"><thead><tr><th><button type="button" className="preview-sort" onClick={() => void handlePreviewSort('__row_number__')} aria-label="Sort observations"># {sortColumn === '__row_number__' ? (sortDirection === 'ascending' ? '↑' : '↓') : ''}</button></th>{previewColumns.map((column) => <th key={column}><span><button type="button" className="preview-sort" onClick={() => void handlePreviewSort(column)} disabled={isSorting}>{column} {sortColumn === column ? (sortDirection === 'ascending' ? '↑' : '↓') : ''}</button>{preview.date_format_suggestions.includes(column) && <button className="date-warning" type="button" onClick={() => setSelectedDateSuggestion(column)} aria-label={`Format suggestion for ${column}`} title="Date display suggestion">!</button>}</span></th>)}</tr></thead><tbody>{augmentedPreviewRows.map((row, rowIndex) => <tr key={preview.source_row_numbers[rowIndex] ?? rowIndex} className={selectedPreviewRows.includes(rowIndex) ? 'is-selected' : ''} tabIndex={0} aria-selected={selectedPreviewRows.includes(rowIndex)} onClick={() => selectPreviewRow(rowIndex)} onKeyDown={(event) => { if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); const nextRow = Math.max(0, Math.min(augmentedPreviewRows.length - 1, rowIndex + (event.key === 'ArrowDown' ? 1 : -1))); selectPreviewRow(nextRow, event.metaKey || event.ctrlKey); (event.currentTarget.parentElement?.children[nextRow] as HTMLElement | undefined)?.focus() }} onPointerDown={(event) => { if (event.button === 2) { event.preventDefault(); startPreviewRangeSelection(rowIndex) } }} onPointerEnter={() => { if (isPreviewRangeSelecting) selectPreviewRow(rowIndex, true) }} onPointerUp={() => setIsPreviewRangeSelecting(false)} onContextMenu={(event) => event.preventDefault()}><td>{preview.source_row_numbers[rowIndex] ?? rowIndex + 1}</td>{previewColumns.map((column) => <td key={column}>{row[column] === null || row[column] === undefined ? '—' : String(row[column])}</td>)}</tr>)}</tbody></table> : <p className="preview-loading">Loading preview…</p>}</div>
                 {selectedDateSuggestion && <div className="date-suggestion" role="dialog" aria-label="Date formatting suggestion"><span className="date-suggestion__icon" aria-hidden="true">!</span><div className="date-suggestion__copy"><strong>{selectedDateSuggestion}</strong><p>Every timestamp is exactly midnight. Show this column as dates only?</p></div><div className="date-suggestion__actions"><button className="date-suggestion__dismiss" type="button" onClick={() => setSelectedDateSuggestion(null)}>Keep timestamps</button><button className="date-suggestion__apply" type="button" onClick={() => void handleApplyDateDisplay()} disabled={isApplyingDateDisplay}>{isApplyingDateDisplay ? 'Applying…' : 'Apply YYYY-MM-DD'}</button></div></div>}
-                <p className="preview-caption">Showing {preview?.rows.length ?? 0} of {preview?.total_rows ?? 0} observations. Click a header to sort; click again for descending order.</p>
+                <p className="preview-caption">Showing {preview?.rows.length ?? 0} of {dataset.row_count.toLocaleString()} observations{filters.length ? ` · ${preview?.total_rows ?? 0} match the active filters` : ''}{selectedPreviewRows.length ? ` · ${selectedPreviewRows.length} selected` : ''}. Click a row to select it; right-click drag across rows to extend the selection.</p>
               </div>
             ) : (
               <div className="visualization-builder">
@@ -725,6 +781,8 @@ export function StudentWorkspacePage() {
         <aside className={`workspace-panel workspace-analysis ${isAnalysisCollapsed ? 'is-collapsed' : ''}`} aria-labelledby="analysis-title"><div className="panel-heading"><div><p className="panel-kicker">03 / Methods</p><h2 id="analysis-title">Analysis</h2></div><button className="panel-toggle" type="button" onClick={() => setIsAnalysisCollapsed((current) => !current)} aria-expanded={!isAnalysisCollapsed} aria-label={isAnalysisCollapsed ? 'Open Analysis panel' : 'Hide Analysis panel'} title={isAnalysisCollapsed ? 'Open Analysis' : 'Hide Analysis'}><span aria-hidden="true">{isAnalysisCollapsed ? '‹' : '›'}</span></button></div><div className="analysis-empty"><div className="analysis-empty__icon" aria-hidden="true">✦</div><p>{dataset ? 'Choose variables to start an analysis.' : 'Load a dataset to start an analysis.'}</p></div><div className="analysis-options" aria-label="Upcoming analysis options"><button type="button" disabled><span>Descriptive statistics</span><span>→</span></button><button type="button" disabled><span>Regression</span><span>→</span></button><button type="button" disabled><span>Time series</span><span>→</span></button></div></aside>
         <section className={`workspace-results ${isResultsCollapsed ? 'is-collapsed' : ''}`} aria-labelledby="results-title"><div className="results-title"><div><p className="panel-kicker">04 / Output</p><h2 id="results-title">Results &amp; interpretation</h2></div><button className="panel-toggle panel-toggle--results" type="button" onClick={() => setIsResultsCollapsed((current) => !current)} aria-expanded={!isResultsCollapsed} aria-label={isResultsCollapsed ? 'Open Results and interpretation panel' : 'Hide Results and interpretation panel'} title={isResultsCollapsed ? 'Open Results' : 'Hide Results'}><span aria-hidden="true">{isResultsCollapsed ? '⌃' : '⌄'}</span></button></div><div className="results-empty"><span className="results-empty__marker" aria-hidden="true">↳</span><p>{dataset ? 'Your dataset is imported. Run an analysis to see statistical output here.' : 'Your statistical results, diagnostics, and explanations will appear here.'}</p></div></section>
       </section>
+
+      {isCustomVariableModalOpen && <div className="delete-modal-backdrop" role="presentation"><section className="delete-modal custom-variable-modal" role="dialog" aria-modal="true" aria-labelledby="custom-variable-title"><p className="panel-kicker">Session-only variable</p><h2 id="custom-variable-title">Create custom variable</h2><p>Available in this browser session, charts, and the data preview. It will not change the uploaded dataset.</p><label>Name<input value={customVariableDraft.name} onChange={(event) => setCustomVariableDraft((current) => ({ ...current, name: event.target.value }))} placeholder="real_cpi" autoFocus /></label><div className="custom-variable-tabs"><button type="button" className={customVariableDraft.mode === 'guided' ? 'is-active' : ''} onClick={() => setCustomVariableDraft((current) => ({ ...current, mode: 'guided' }))}>Guided</button><button type="button" className={customVariableDraft.mode === 'formula' ? 'is-active' : ''} onClick={() => setCustomVariableDraft((current) => ({ ...current, mode: 'formula' }))}>Formula</button></div>{customVariableDraft.mode === 'guided' ? <><label>Operation<select value={customVariableDraft.kind} onChange={(event) => setCustomVariableDraft((current) => ({ ...current, kind: event.target.value as CustomVariableDraft['kind'], operator: event.target.value === 'arithmetic' ? '+' : event.target.value === 'transform' ? 'log' : event.target.value === 'time' ? 'lag' : current.operator }))}><option value="arithmetic">Arithmetic</option><option value="transform">Transform</option><option value="time">Time-series</option><option value="condition">If / then rule</option></select></label><label>Source variable<select value={customVariableDraft.source} onChange={(event) => setCustomVariableDraft((current) => ({ ...current, source: event.target.value }))}>{numericVariableNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>{customVariableDraft.kind === 'arithmetic' && <><label>Operator<select value={customVariableDraft.operator} onChange={(event) => setCustomVariableDraft((current) => ({ ...current, operator: event.target.value }))}><option>+</option><option>-</option><option>*</option><option>/</option></select></label><label>Other variable or constant<input value={customVariableDraft.operand} onChange={(event) => setCustomVariableDraft((current) => ({ ...current, operand: event.target.value }))} placeholder="100 or CPI" /></label></>}{customVariableDraft.kind === 'transform' && <label>Transformation<select value={customVariableDraft.operator} onChange={(event) => setCustomVariableDraft((current) => ({ ...current, operator: event.target.value }))}><option value="log">Log</option><option value="sqrt">Square root</option><option value="abs">Absolute value</option></select></label>}{customVariableDraft.kind === 'time' && <><label>Transformation<select value={customVariableDraft.operator} onChange={(event) => setCustomVariableDraft((current) => ({ ...current, operator: event.target.value }))}><option value="lag">Lag</option><option value="diff">Difference</option><option value="pct_change">Percent change</option></select></label><label>Periods<input type="number" min="1" value={customVariableDraft.operand} onChange={(event) => setCustomVariableDraft((current) => ({ ...current, operand: event.target.value }))} /></label></>}{customVariableDraft.kind === 'condition' && <label>Formula<textarea value={customVariableDraft.formula} onChange={(event) => setCustomVariableDraft((current) => ({ ...current, formula: event.target.value }))} placeholder="if(CPI > 100, 1, 0)" /></label>}</> : <label>Formula<textarea value={customVariableDraft.formula} onChange={(event) => setCustomVariableDraft((current) => ({ ...current, formula: event.target.value }))} placeholder="Examples: CPI / 100, log(CPI), lag(CPI, 1), if(CPI > 100, 1, 0)" /></label>}{customVariableError && <p className="custom-variable-error">{customVariableError}</p>}<div className="delete-modal__actions"><button className="delete-modal__cancel" type="button" onClick={() => setIsCustomVariableModalOpen(false)}>Cancel</button><button className="delete-modal__confirm" type="button" onClick={addCustomVariable}>Add variable</button></div></section></div>}
 
       {pendingDeletion && (
         <div className="delete-modal-backdrop" role="presentation">
