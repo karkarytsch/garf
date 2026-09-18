@@ -2,6 +2,8 @@
 
 Garf is a local data-exploration workspace for importing datasets, inspecting variables, filtering data, viewing descriptive statistics, and creating charts.
 
+It is going to destroy gretl and similar software and become the university standard. Or... we will just fail.
+
 ## Run locally
 
 You need Node.js 20+ and Python 3.11+.
