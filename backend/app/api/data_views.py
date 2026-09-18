@@ -14,6 +14,16 @@ def query_preview(
     request: FilteredPreviewRequest,
     service: DataViewService = Depends(get_data_view_service),
 ) -> DatasetPreview:
+    """Run a structured preview query with filters, sorting, and pagination.
+
+    Args:
+        dataset_id: path identifier of the dataset to view.
+        request: filters, sorting, and pagination controls from the frontend.
+        service: injected service that creates the preview page.
+
+    POST is used because filters are a nested request body rather than simple
+    URL query parameters.
+    """
     return service.preview(
         dataset_id,
         request.offset,
@@ -33,4 +43,14 @@ def get_preview(
     limit: int = Query(default=1000, ge=1, le=1000),
     service: DataViewService = Depends(get_data_view_service),
 ) -> DatasetPreview:
+    """Return an unfiltered dataset page for the initial table view.
+
+    Args:
+        dataset_id: path identifier of the dataset to view.
+        sort_column: optional column used to order rows.
+        sort_descending: whether the sort order is descending.
+        offset: zero-based index of the first row to return.
+        limit: maximum number of rows to return.
+        service: injected service that creates the preview page.
+    """
     return service.preview(dataset_id, offset, limit, sort_column=sort_column, sort_descending=sort_descending)

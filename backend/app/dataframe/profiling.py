@@ -8,6 +8,18 @@ from app.schemas import VariableMetadata
 
 
 def json_value(value: Any) -> Any:
+    """Convert a pandas or NumPy value into a JSON-compatible value.
+
+    Args:
+        value: scalar value taken from a dataframe or calculation result.
+
+    Example:
+        ``json_value(pd.Timestamp("2026-01-01"))`` returns
+        ``"2026-01-01T00:00:00"``.
+
+    Metadata, previews, and statistics use this conversion before they are
+    returned in JSON responses.
+    """
     if value is None or pd.isna(value):
         return None
     if isinstance(value, pd.Timestamp):
@@ -20,6 +32,19 @@ def json_value(value: Any) -> Any:
 
 
 def profile_frame(frame: pd.DataFrame) -> list[VariableMetadata]:
+    """Create metadata records for every variable in a dataframe.
+
+    Args:
+        frame: normalized dataframe whose columns should be profiled.
+
+    Example:
+        ``profile_frame(pd.DataFrame({"price": [1.2, 1.5]}))`` returns one
+        metadata record with ``logical_type`` set to ``"numeric"``.
+
+    The import and variable services call this after data is created or
+    changed. Its result supplies types, sample values, ranges, and counts to
+    the frontend without sending full columns.
+    """
     variables: list[VariableMetadata] = []
     for position, name in enumerate(frame.columns):
         series = frame[name]
@@ -59,8 +84,6 @@ def profile_frame(frame: pd.DataFrame) -> list[VariableMetadata]:
                 sample_values=samples,
                 min_value=min_value,
                 max_value=max_value,
-                is_time_candidate=is_datetime,
-                is_numeric_candidate=is_numeric,
             )
         )
     return variables

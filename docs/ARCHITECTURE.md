@@ -6,10 +6,14 @@ This document describes the implementation currently in the repository.
 
 ```text
 backend/                 FastAPI dataset API and Python tests
-  app/main.py            application and HTTP routes
-  app/datasets.py        dataset import, persistence, metadata, previews, filters
+  app/main.py            application setup and router registration
+  app/api/               HTTP routes grouped by use case
+  app/services/          dataset, variable, view, and analysis orchestration
+  app/storage/           local JSON registry and Parquet storage adapter
+  app/dataframe/         normalization, profiling, filtering, imports, previews
+  app/dependencies.py    process-local service wiring
   app/schemas.py         Pydantic request and response models
-  tests/test_datasets.py dataset-store tests
+  tests/test_datasets.py dataframe, service, and API-contract tests
 frontend/                Vite + React + TypeScript client
   src/api.ts             typed HTTP client and shared API types
   src/App.tsx            routes
@@ -23,9 +27,13 @@ README.md                local development instructions
 
 ## Backend
 
-`backend/app/main.py` creates the FastAPI application and one process-local `DatasetStore`. CORS permits the Vite development origins on ports 5173.
+`backend/app/main.py` creates the FastAPI application, configures CORS, and registers the API router. CORS permits the Vite development origins on ports 5173.
 
-`DatasetStore` is the current data boundary. It imports CSV, XLSX, and Parquet files with pandas; normalizes column names; infers datetime columns from date-like names and values; profiles variables; and serves dataset operations. Supported operations are:
+Routes are grouped by user-facing use case: datasets, variables and dataset display settings, data views, descriptive analysis, and service health. `dependencies.py` creates one process-local `DatasetRepository` and the services that use it.
+
+`DatasetRepository` is the persistence boundary. It owns the local JSON registry, dataset directories, and reads and writes canonical Parquet frames. Dataset, variable, data-view, and descriptive-statistics services orchestrate their respective operations. Pure pandas operations are separated into dedicated dataframe modules for importing, normalization, profiling, filtering, and preview construction.
+
+The supported operations are:
 
 - import, list, fetch summary, and delete datasets;
 - list, rename, and delete variables;
@@ -33,7 +41,7 @@ README.md                local development instructions
 - filter previews and descriptive statistics with the same filter rules;
 - save a date-only display preference for datetime columns.
 
-The API is rooted at `/api`. `schemas.py` defines the JSON contract for dataset summaries, variable metadata, previews, filters, renames, and date-display requests. There is no authentication, database, background work queue, or server-side analysis/model API.
+The API is rooted at `/api`. `schemas.py` defines the JSON contract for dataset summaries, variable metadata, previews, filters, renames, and date-display requests. The route paths and contracts remain unchanged by the module split. There is no authentication, database, background work queue, or server-side analysis/model API.
 
 ## Dataset flow and persistence
 
@@ -84,6 +92,6 @@ The frontend currently calls the dataset, variable, preview, filter, and date-di
 
 ## Testing and local operation
 
-Backend tests in `backend/tests/test_datasets.py` cover normalization, profiling, filtering, previews, date-display settings, renaming, and variable deletion against temporary storage. The frontend has no test suite configured; `npm run build` runs TypeScript compilation followed by the Vite production build.
+Backend tests in `backend/tests/test_datasets.py` cover normalization, profiling, filtering, previews, date-display settings, renaming, and variable deletion against temporary storage. They also assert the OpenAPI route set and methods so router refactors cannot silently change the frontend API. The frontend has no test suite configured; `npm run build` runs TypeScript compilation followed by the Vite production build.
 
 Run the backend with Uvicorn on port 8000 and the frontend with Vite on port 5173, as described in `README.md`. The development frontend connects to the API over HTTP using the configured API URL.

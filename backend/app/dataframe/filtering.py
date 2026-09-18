@@ -7,6 +7,19 @@ from app.schemas import PreviewFilter
 
 
 def apply_filters(frame: pd.DataFrame, filters: list[PreviewFilter]) -> pd.DataFrame:
+    """Return rows that satisfy every supplied filter.
+
+    Args:
+        frame: dataframe to filter without modifying its stored version.
+        filters: validated rules to combine with logical AND.
+
+    Example:
+        ``apply_filters(frame, [PreviewFilter(column="price", operator="greater_than", value="10")])``
+        returns rows where ``price`` is greater than 10.
+
+    Preview and statistics services share this function so both operations use
+    the same selected subset. Invalid rules raise API validation errors.
+    """
     filtered = frame
     for rule in filters:
         if rule.column not in filtered.columns:

@@ -10,6 +10,19 @@ SUPPORTED_SUFFIXES = {".csv": "csv", ".xlsx": "xlsx", ".parquet": "parquet"}
 
 
 def read_source(path: Path, source_format: str) -> pd.DataFrame:
+    """Read a supported source file into a dataframe.
+
+    Args:
+        path: local path of the uploaded source file.
+        source_format: validated format name: ``csv``, ``xlsx``, or ``parquet``.
+
+    Example:
+        ``read_source(Path("prices.csv"), "csv")`` reads the CSV into a
+        pandas dataframe.
+
+    DatasetService calls this after saving an upload. CSV files use common
+    encodings; XLSX and Parquet use their corresponding pandas readers.
+    """
     if source_format == "csv":
         last_error: Exception | None = None
         for encoding in ("utf-8-sig", "utf-8", "latin-1"):

@@ -19,6 +19,21 @@ def build_preview(
     sort_descending: bool,
     date_only_columns: set[str],
 ) -> DatasetPreview:
+    """Build a JSON-safe page of a dataset for the frontend.
+
+    Args:
+        dataset_id: identifier included in the returned preview.
+        frame: canonical dataframe loaded from Parquet.
+        offset: zero-based index of the first requested row.
+        limit: maximum number of rows to include.
+        filters: rules applied before sorting and pagination.
+        sort_column: column name, or ``__row_number__``, used for sorting.
+        sort_descending: whether to reverse the sort order.
+        date_only_columns: datetime columns formatted as dates for display.
+
+    The function prevents large datasets from being sent in full: it filters,
+    sorts, pages, tracks original row numbers, and serializes the result.
+    """
     filtered_frame = apply_filters(frame, filters)
     if sort_column == "__row_number__":
         filtered_frame = filtered_frame.sort_index(ascending=not sort_descending, kind="stable")

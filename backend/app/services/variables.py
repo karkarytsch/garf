@@ -9,13 +9,42 @@ from app.storage.datasets import DatasetRepository
 
 
 class VariableService:
+    """Handle changes to variables inside an existing dataset.
+
+    Args:
+        repository: filesystem adapter supplied during service construction.
+
+    Variable routes use this service for column listing, renaming, deletion,
+    and date display settings. Data-changing operations rewrite the canonical
+    Parquet file and refresh metadata so future workspace requests stay valid.
+    """
+
     def __init__(self, repository: DatasetRepository) -> None:
+        """Initialize the service with its persistence dependency.
+
+        Args:
+            repository: filesystem adapter used to load and persist datasets.
+        """
         self.repository = repository
 
     def list_variables(self, dataset_id: str) -> list[VariableMetadata]:
+        """Return the saved profile for every variable in a dataset.
+
+        Args:
+            dataset_id: identifier of the dataset whose variables are requested.
+        """
         return DatasetSummary.model_validate(self.repository.get_record(dataset_id)).variables
 
     def delete_variable(self, dataset_id: str, variable_name: str) -> DatasetSummary:
+        """Remove one variable while keeping the dataset and its metadata valid.
+
+        Args:
+            dataset_id: identifier of the dataset to modify.
+            variable_name: normalized column name to remove.
+
+        At least one variable must remain because an empty dataframe would not
+        be useful in the data workspace.
+        """
         registry = self.repository.get_registry()
         record = registry.get(dataset_id)
         if record is None:
@@ -36,6 +65,13 @@ class VariableService:
         return DatasetSummary.model_validate(record)
 
     def rename_variable(self, dataset_id: str, variable_name: str, new_name: str) -> DatasetSummary:
+        """Rename one variable and update metadata that refers to its name.
+
+        Args:
+            dataset_id: identifier of the dataset to modify.
+            variable_name: current normalized column name.
+            new_name: replacement column name requested by the user.
+        """
         registry = self.repository.get_registry()
         record = registry.get(dataset_id)
         if record is None:
@@ -61,6 +97,15 @@ class VariableService:
         return DatasetSummary.model_validate(record)
 
     def set_date_only_display(self, dataset_id: str, column: str) -> None:
+        """Remember that a datetime variable should display dates without times.
+
+        Args:
+            dataset_id: identifier of the dataset to update.
+            column: datetime column that should display dates only.
+
+        This is a presentation preference, not a data conversion: the Parquet
+        column stays a full datetime value for future analysis.
+        """
         registry = self.repository.get_registry()
         record = registry.get(dataset_id)
         if record is None:

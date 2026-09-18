@@ -15,10 +15,34 @@ from app.storage.datasets import DatasetRepository
 
 
 class DatasetService:
+    """Coordinate dataset-level workflows between API routes and storage.
+
+    Args:
+        repository: filesystem adapter supplied during service construction.
+
+    This service handles the dataset lifecycle: import, list, inspect, and
+    delete. It uses dataframe helpers for data preparation and the repository
+    for local files, keeping HTTP routes small and focused.
+    """
+
     def __init__(self, repository: DatasetRepository) -> None:
+        """Initialize the service with its persistence dependency.
+
+        Args:
+            repository: filesystem adapter used to store dataset files and metadata.
+        """
         self.repository = repository
 
     async def import_upload(self, upload: UploadFile) -> DatasetSummary:
+        """Import an uploaded file and return its persisted dataset summary.
+
+        Args:
+            upload: FastAPI file object supplied by the dataset upload route.
+
+        The source file is retained, and its normalized dataframe is saved as
+        Parquet. The method profiles variables and records metadata so the
+        workspace can load summaries without reading every source file.
+        """
         filename = upload.filename or "dataset"
         suffix = Path(filename).suffix.lower()
         source_format = SUPPORTED_SUFFIXES.get(suffix)
@@ -62,14 +86,25 @@ class DatasetService:
         return DatasetSummary.model_validate(record)
 
     def list_summaries(self) -> list[DatasetSummary]:
+        """Return saved datasets newest first for workspace restoration."""
         records = self.repository.get_registry().values()
         sorted_records = sorted(records, key=lambda record: record["created_at"], reverse=True)
         return [DatasetSummary.model_validate(record) for record in sorted_records]
 
     def get_summary(self, dataset_id: str) -> DatasetSummary:
+        """Return the metadata needed to open one saved dataset.
+
+        Args:
+            dataset_id: identifier of the dataset to inspect.
+        """
         return DatasetSummary.model_validate(self.repository.get_record(dataset_id))
 
     def delete(self, dataset_id: str) -> None:
+        """Delete a dataset's files and remove its metadata registry record.
+
+        Args:
+            dataset_id: identifier of the dataset to delete.
+        """
         registry = self.repository.get_registry()
         if dataset_id not in registry:
             raise HTTPException(status_code=404, detail="Dataset not found.")

@@ -13,6 +13,7 @@ from app.storage.datasets import DatasetRepository
 
 
 def test_openapi_keeps_existing_api_routes() -> None:
+    """Keep the frontend's established endpoint paths and methods stable."""
     paths = app.openapi()["paths"]
 
     assert set(paths) == {
@@ -30,6 +31,7 @@ def test_openapi_keeps_existing_api_routes() -> None:
 
 
 def test_profile_frame_identifies_numeric_datetime_and_categorical_columns() -> None:
+    """Check that imported columns receive the metadata used by the workspace."""
     frame = pd.DataFrame(
         {
             "date": ["2026-01-01", "2026-01-02", "2026-01-03"],
@@ -41,13 +43,12 @@ def test_profile_frame_identifies_numeric_datetime_and_categorical_columns() -> 
     variables = {variable.name: variable for variable in profile_frame(normalize_frame(frame))}
 
     assert variables["date"].logical_type == "datetime"
-    assert variables["date"].is_time_candidate is True
     assert variables["price"].logical_type == "numeric"
-    assert variables["price"].is_numeric_candidate is True
     assert variables["region"].logical_type == "categorical"
 
 
 def test_normalize_frame_makes_duplicate_and_blank_names_unique() -> None:
+    """Check that imports receive stable names for unusable source headers."""
     frame = pd.DataFrame([[1, 2, 3]], columns=["value", "value", " "])
     normalized = normalize_frame(frame)
 
@@ -55,6 +56,11 @@ def test_normalize_frame_makes_duplicate_and_blank_names_unique() -> None:
 
 
 def test_delete_variable_updates_saved_dataset_and_metadata(tmp_path) -> None:
+    """Check that deleting a variable updates both Parquet data and its profile.
+
+    Args:
+        tmp_path: pytest temporary directory used as isolated dataset storage.
+    """
     repository = DatasetRepository(tmp_path)
     data_views = DataViewService(repository)
     variables = VariableService(repository)
@@ -101,6 +107,11 @@ def test_delete_variable_updates_saved_dataset_and_metadata(tmp_path) -> None:
 
 
 def test_preview_filters_are_combined_with_and(tmp_path) -> None:
+    """Check that every active filter narrows the preview's dataset subset.
+
+    Args:
+        tmp_path: pytest temporary directory reserved for this test.
+    """
     frame = pd.DataFrame({
         "date": pd.to_datetime(["2026-01-01", "2026-02-01", "2026-03-01"]),
         "price": [1.2, 1.8, 2.1],
@@ -118,6 +129,11 @@ def test_preview_filters_are_combined_with_and(tmp_path) -> None:
 
 
 def test_rename_variable_updates_parquet_metadata_and_date_display_state(tmp_path) -> None:
+    """Check that renaming keeps data, metadata, and display settings aligned.
+
+    Args:
+        tmp_path: pytest temporary directory used as isolated dataset storage.
+    """
     repository = DatasetRepository(tmp_path)
     data_views = DataViewService(repository)
     variables = VariableService(repository)

@@ -9,10 +9,34 @@ from app.storage.datasets import DatasetRepository
 
 
 class DescriptiveStatisticsService:
+    """Calculate descriptive statistics for a dataset or filtered subset.
+
+    Args:
+        repository: filesystem adapter supplied during service construction.
+
+    This service is the first analysis-focused boundary in the backend. It
+    shares filtering with previews so users can connect a visible data subset
+    to its numeric summaries and categorical modes.
+    """
+
     def __init__(self, repository: DatasetRepository) -> None:
+        """Initialize the service with its calculation data dependency.
+
+        Args:
+            repository: filesystem adapter used to load canonical dataframes.
+        """
         self.repository = repository
 
     def calculate(self, dataset_id: str, filters: list[PreviewFilter] | None = None) -> list[dict[str, Any]]:
+        """Calculate per-variable descriptive statistics after optional filters.
+
+        Args:
+            dataset_id: identifier of the dataset to analyze.
+            filters: optional preview-compatible rules that select rows first.
+
+        Numeric variables receive common distribution measures. Other variable
+        types receive their most frequent non-missing value.
+        """
         record = self.repository.get_record(dataset_id)
         frame = self.repository.read_frame(record)
         if filters:

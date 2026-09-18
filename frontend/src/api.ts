@@ -11,8 +11,6 @@ export interface VariableMetadata {
   sample_values: unknown[]
   min_value: unknown | null
   max_value: unknown | null
-  is_time_candidate: boolean
-  is_numeric_candidate: boolean
 }
 
 export interface DatasetSummary {
